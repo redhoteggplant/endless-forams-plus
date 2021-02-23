@@ -9,9 +9,7 @@ import os, json, cv2, random
 
 # import some common detectron2 utilities
 from detectron2 import model_zoo
-from detectron2.engine import DefaultPredictor
 from detectron2.config import get_cfg
-from detectron2.utils.visualizer import Visualizer, ColorMode
 from detectron2.data import MetadataCatalog, DatasetCatalog
 from detectron2.data.datasets import register_coco_instances, load_coco_json
 
@@ -31,82 +29,6 @@ def register_dataset(dataset_name="prism", annotation_file="annotation", data_di
         except:
             print(f"Dataset {dataset_name}_{d} is already registered")
         MetadataCatalog.get(f"{dataset_name}_{d}").set(thing_classes=['planktonic foraminifera']) # [c['name'] for c in dataset.categories])
-
-
-## Train!
-
-# %cp -r AdelaiDet/adet .
-# !wget https://cloudstor.aarnet.edu.au/plus/s/glqFc13cCoEyHYy/download -O SOLOv2_R50_3x.pth
-
-from detectron2.engine import DefaultTrainer
-from detectron2.evaluation import COCOEvaluator
-
-class Trainer(DefaultTrainer):
-
-    @classmethod
-    def build_evaluator(cls, cfg, dataset_name, output_folder=None):
-        """
-        Create evaluator(s) for a given dataset.
-        """
-        if output_folder is None:
-            output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
-        evaluator_type = MetadataCatalog.get(dataset_name).evaluator_type
-        assert evaluator_type == "coco"
-        return COCOEvaluator(dataset_name, ("bbox", "segm"), False, output_dir=output_folder)
-
-
-
-def train_model(cfg, args):
-    skip_train = args.eval_only or os.path.exists(cfg.OUTPUT_DIR)
-    if os.path.exists(cfg.OUTPUT_DIR):
-        print(f"{cfg.OUTPUT_DIR} already exists. Skipping training")
-    else:
-        os.makedirs(cfg.OUTPUT_DIR, exist_ok=False)
-    trainer = Trainer(cfg)
-    trainer.resume_or_load(resume=args.resume)
-    if not skip_train:
-        trainer.train()
-    return trainer
-
-
-"""Then, we randomly select several samples to visualize the prediction results."""
-
-def visualize_predictions(dataset_name, annotation_json, image_dir):
-    dataset_dicts = load_coco_json(annotation_json, image_dir)
-    metadata = MetadataCatalog.get(dataset_name)
-    for d in dataset_dicts: # random.sample(dataset_dicts, 3):
-        im = cv2.imread(d["file_name"])
-        print(d["file_name"].split("/")[-1])
-        outputs = predictor(im)  # format is documented at https://detectron2.readthedocs.io/tutorials/models.html#model-output-format
-        v = Visualizer(im[:, :, ::-1],
-                       metadata=metadata,
-                       scale=0.2,
-                       instance_mode=ColorMode.IMAGE_BW   # remove the colors of unsegmented pixels. This option is only available for segmentation models
-        )
-        out = v.draw_instance_predictions(outputs["instances"].to("cpu"))
-        cv2.imshow(out.get_image()[:, :, ::-1])
-
-"""
-We can also evaluate its performance using AP metric implemented in COCO API.
-"""
-
-from detectron2.evaluation import COCOEvaluator, inference_on_dataset
-from detectron2.data import build_detection_test_loader
-
-def evaluate(trainer, cfg, dataset_name):
-    cfg.defrost()
-    cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, "model_final.pth")
-    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.7  # set a custom testing threshold; default = 0.05
-
-    cfg.DATASETS.TEST = (dataset_name,)
-    cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, dataset_name)
-    cfg.freeze()
-    metrics = Trainer.test(cfg, trainer.model)
-
-    # evaluator = COCOEvaluator(dataset_name, ("bbox", "segm"), False, output_dir=os.path.join(cfg.OUTPUT_DIR, dataset_name))
-    # test_loader = build_detection_test_loader(cfg, dataset_name)
-    # metrics = inference_on_dataset(trainer.model, test_loader, evaluator)
-    return metrics
 
 
 def get_mrcnn_cfg(model=DEFAULT_MODEL, config_path=DEFAULT_CONFIG_PATH,
@@ -165,13 +87,87 @@ def setup_cfgs(args):
     return cfgs
 
 
+## Train!
+
+from detectron2.engine import DefaultTrainer
+from detectron2.evaluation import COCOEvaluator
+
+class Trainer(DefaultTrainer):
+
+    @classmethod
+    def build_evaluator(cls, cfg, dataset_name, output_folder=None):
+        """
+        Create evaluator(s) for a given dataset.
+        """
+        if output_folder is None:
+            output_folder = os.path.join(cfg.OUTPUT_DIR, "inference")
+        evaluator_type = MetadataCatalog.get(dataset_name).evaluator_type
+        assert evaluator_type == "coco"
+        return COCOEvaluator(dataset_name, ("bbox", "segm"), False, output_dir=output_folder)
+
+
+
+def build_and_train_model(cfg, args):
+    skip_train = args.eval_only or os.path.exists(cfg.OUTPUT_DIR)
+    if os.path.exists(cfg.OUTPUT_DIR):
+        print(f"{cfg.OUTPUT_DIR} already exists. Skipping training")
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+    trainer = Trainer(cfg)
+    trainer.resume_or_load(resume=args.resume)
+    if not skip_train:
+        trainer.train()
+    return trainer
+
+
+def evaluate(trainer, cfg, dataset_name):
+    cfg.defrost()
+    cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, "model_final.pth")
+    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.7  # set a custom testing threshold; default = 0.05
+
+    cfg.DATASETS.TEST = (dataset_name,)
+    cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, dataset_name)
+    cfg.freeze()
+    metrics = Trainer.test(cfg, trainer.model)
+    return metrics
+
+
+from detectron2.utils.events import EventStorage, JSONWriter
+from detectron2.utils.file_io import PathManager
+from detectron2.evaluation.testing import flatten_results_dict
+
+def save_metrics(metrics, output_dir, iter):
+    PathManager.mkdirs(output_dir)
+    with EventStorage(iter) as storage:
+        writer = JSONWriter(os.path.join(output_dir, "metrics.json"))
+        storage.put_scalars(**metrics)
+        writer.write()
+        writer.close()
+
+
+"""Then, we randomly select several samples to visualize the prediction results."""
+
+from detectron2.utils.visualizer import Visualizer, ColorMode
+
+def visualize_predictions(dataset_name, annotation_json, image_dir):
+    dataset_dicts = load_coco_json(annotation_json, image_dir)
+    metadata = MetadataCatalog.get(dataset_name)
+    for d in dataset_dicts: # random.sample(dataset_dicts, 3):
+        im = cv2.imread(d["file_name"])
+        print(d["file_name"].split("/")[-1])
+        outputs = predictor(im)  # format is documented at https://detectron2.readthedocs.io/tutorials/models.html#model-output-format
+        v = Visualizer(im[:, :, ::-1],
+                       metadata=metadata,
+                       scale=0.2,
+                       instance_mode=ColorMode.IMAGE_BW   # remove the colors of unsegmented pixels. This option is only available for segmentation models
+        )
+        out = v.draw_instance_predictions(outputs["instances"].to("cpu"))
+        cv2.imshow(out.get_image()[:, :, ::-1])
+
+
 import pandas as pd
 
 def run_data_expts(args, num_reps=5):
-    # split_ratios = [(0.1, 0.1), (0.15, 0.15), (0.2, 0.2)]
-    # split_ratios = [(0.1, 0.1)]
-    # split_ratios = [(0.15, 0.15)]
-    split_ratios = [(0.2, 0.2)]
+    split_ratios = [(0.1, 0.1), (0.15, 0.15), (0.2, 0.2)]
     for val_size, test_size in split_ratios:
         metrics_list = []
         max_iter, output_dir = 0, ""
@@ -189,7 +185,7 @@ def run_data_expts(args, num_reps=5):
             max_iter, output_dir = cfg.SOLVER.MAX_ITER, os.path.dirname(cfg.OUTPUT_DIR)
 
             # Train model
-            trainer = train_model(cfg, args)
+            trainer = build_and_train_model(cfg, args)
 
             # Evaluate on test data
             metrics_i = evaluate(trainer, cfg, f"{dataset_name}_test")
@@ -199,20 +195,7 @@ def run_data_expts(args, num_reps=5):
         df = pd.DataFrame.from_dict(metrics_list)
         s = df.mean(axis=0)
         metrics = s.to_dict()
-        save_metrics(metrics, output_dir, max_iter):
-
-
-from detectron2.utils.events import EventStorage, JSONWriter
-from detectron2.utils.file_io import PathManager
-from detectron2.evaluation.testing import flatten_results_dict
-
-def save_metrics(metrics, output_dir, iter):
-    PathManager.mkdirs(output_dir)
-    with EventStorage(iter) as storage:
-        writer = JSONWriter(os.path.join(output_dir, "metrics.json"))
-        storage.put_scalars(**metrics)
-        writer.write()
-        writer.close()
+        save_metrics(metrics, output_dir, max_iter)
 
 
 def main(args):
@@ -225,7 +208,7 @@ def main(args):
         register_dataset()
         cfgs = setup_cfgs(args)
         for cfg in cfgs:
-            trainer = train_model(cfg, args)
+            trainer = build_and_train_model(cfg, args)
             metrics = evaluate(trainer, cfg, "prism_test")
             save_metrics(metrics, cfg.OUTPUT_DIR, cfg.SOLVER.MAX_ITER)
 
