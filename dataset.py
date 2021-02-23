@@ -8,7 +8,13 @@ from sklearn.model_selection import train_test_split
 
 import os
 
-def get_segments_dataset(dataset_name='nadiairwanto/PRISM', release_name='v0.5.4', annotation_file='annotations.json'):
+DATA_DIR = "./dataset"
+
+def get_segments_dataset(
+    dataset_name='nadiairwanto/PRISM',
+    release_name='v0.5.4',
+    annotation_file=os.path.join(DATA_DIR, 'annotations.json')
+):
     """
     Obtain reviewed images from the specified Segments.ai dataset release.
     """
@@ -37,26 +43,28 @@ def save_coco(file, info, images, annotations, categories):
             'images': images,
             'annotations': annotations,
             'categories': categories
-            }, coco, indent=2, sort_keys=True)
+            }, coco, indent=2, sort_keys=True
+        )
 
 
-def split_dataset(images, val_size, test_size, random_state=123):
+def split_dataset(images, val_size, test_size, random_state):
     # split dataset https://github.com/akarazniewicz/cocosplit/blob/master/cocosplit.py
     images_train, images_test = train_test_split(images, test_size=test_size,
-                                                    random_state=random_state)
-    images_train, images_val = train_test_split(images_train, test_size=val_size/(1-test_size),
-                                                    random_state=random_state)
+        random_state=random_state)
+    images_train, images_val = train_test_split(images_train,
+        test_size=val_size/(1-test_size), random_state=random_state)
     return images_train, images_val, images_test
 
 
-def prepare_dataset(val_size=0.15, test_size=0.15):
-    # split_ratio = f"{int((1-val_size-test_size)*100)}-{int(val_size*100)}-{int(test_size*100)}"
-    json_train = f"annotation_train.json"
-    json_val = f"annotation_val.json"
-    json_test = f"annotation_test.json"
+def prepare_dataset(annot_name="annotation", val_size=0.15, test_size=0.15, random_state=123):
+    json_train = f"{DATA_DIR}/{annot_name}_train.json"
+    json_val = f"{DATA_DIR}/{annot_name}_val.json"
+    json_test = f"{DATA_DIR}/{annot_name}_test.json"
 
-    if os.path.exists(json_train):
+    if os.path.exists(json_train) and os.path.exists(json_val) and os.path.exists(json_test):
         return json_train, json_val, json_test
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR)
 
     # download dataset
     annotation_json, image_dir = get_segments_dataset()
@@ -69,7 +77,7 @@ def prepare_dataset(val_size=0.15, test_size=0.15):
         annotations = coco['annotations']
         categories = coco['categories']
 
-        images_train, images_val, images_test = split_dataset(images, val_size, test_size)
+        images_train, images_val, images_test = split_dataset(images, val_size, test_size, random_state)
 
         save_coco(json_train, info, images_train, annotations, categories)
         save_coco(json_val, info, images_val, annotations, categories)
