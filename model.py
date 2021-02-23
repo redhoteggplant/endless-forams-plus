@@ -24,13 +24,13 @@ DEFAULT_IMS_PER_BATCH = 2
 
 
 # register dataset
-def register_dataset(dataset_name="prism", annotation_file="annotation", image_dir="segments/nadiairwanto_PRISM/v0.5.4/"):
-    for d in ["_train", "_val", "_test"]:
+def register_dataset(dataset_name="prism", annotation_file="annotation", data_dir="./dataset", image_dir="./segments/nadiairwanto_PRISM/v0.5.4/"):
+    for d in ["train", "val", "test"]:
         try:
-            register_coco_instances(dataset_name + d, {}, f"{annotation_file}{d}.json", image_dir)
+            register_coco_instances(f"{dataset_name}_{d}", {}, f"{data_dir}/{annotation_file}_{d}.json", image_dir)
         except:
-            print(f"Dataset {dataset_name + d} is already registered")
-        MetadataCatalog.get(dataset_name + d).set(thing_classes=['planktonic foraminifera']) # [c['name'] for c in dataset.categories])
+            print(f"Dataset {dataset_name}_{d} is already registered")
+        MetadataCatalog.get(f"{dataset_name}_{d}").set(thing_classes=['planktonic foraminifera']) # [c['name'] for c in dataset.categories])
 
 
 ## Train!
@@ -57,10 +57,15 @@ class Trainer(DefaultTrainer):
 
 
 def train_model(cfg, args):
-    os.makedirs(cfg.OUTPUT_DIR, exist_ok=False)
+    skip_train = args.eval_only or os.path.exists(cfg.OUTPUT_DIR)
+    if os.path.exists(cfg.OUTPUT_DIR):
+        print(f"{cfg.OUTPUT_DIR} already exists. Skipping training")
+    else:
+        os.makedirs(cfg.OUTPUT_DIR, exist_ok=False)
     trainer = Trainer(cfg)
     trainer.resume_or_load(resume=args.resume)
-    trainer.train()
+    if not skip_train:
+        trainer.train()
     return trainer
 
 
@@ -89,13 +94,25 @@ from detectron2.evaluation import COCOEvaluator, inference_on_dataset
 from detectron2.data import build_detection_test_loader
 
 def evaluate(trainer, cfg, dataset_name):
+    cfg.defrost()
     cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, "model_final.pth")
-    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.7   # set a custom testing threshold
+    cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.7  # set a custom testing threshold; default = 0.05
+
     cfg.DATASETS.TEST = (dataset_name,)
-    res = Trainer.test(cfg, trainer.model)
+    cfg.OUTPUT_DIR = os.path.join(cfg.OUTPUT_DIR, dataset_name)
+    cfg.freeze()
+    metrics = Trainer.test(cfg, trainer.model)
+
+    # evaluator = COCOEvaluator(dataset_name, ("bbox", "segm"), False, output_dir=os.path.join(cfg.OUTPUT_DIR, dataset_name))
+    # test_loader = build_detection_test_loader(cfg, dataset_name)
+    # metrics = inference_on_dataset(trainer.model, test_loader, evaluator)
+    return metrics
 
 
-def get_mrcnn_cfg(model=DEFAULT_MODEL, config_path=DEFAULT_CONFIG_PATH, lr=DEFAULT_BASE_LR, ims_per_batch=DEFAULT_IMS_PER_BATCH, dataset_name="prism"):
+def get_mrcnn_cfg(model=DEFAULT_MODEL, config_path=DEFAULT_CONFIG_PATH,
+    lr=DEFAULT_BASE_LR, ims_per_batch=DEFAULT_IMS_PER_BATCH,
+    dataset_name="prism"
+):
     cfg = get_cfg()
     cfg.merge_from_file(model_zoo.get_config_file(config_path))
     cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url(config_path)  # Let training initialize from model zoo
@@ -115,11 +132,11 @@ def get_mrcnn_cfg(model=DEFAULT_MODEL, config_path=DEFAULT_CONFIG_PATH, lr=DEFAU
     # NOTE: this config means the number of classes, but a few popular unofficial tutorials incorrect uses num_classes+1 here.
 
     exp_string = f"{model.lower()}.lr_{lr}" # .ims_per_batch_{ims_per_batch}"
-    cfg.OUTPUT_DIR = os.path.join("./output", exp_string)
+    cfg.OUTPUT_DIR = os.path.join("./tmp/output", exp_string)
     return cfg
 
 
-def setup(args):
+def setup_cfgs(args):
     """
     Create configs and perform basic setups.
     """
@@ -130,53 +147,87 @@ def setup(args):
         "R101-FPN": "COCO-InstanceSegmentation/mask_rcnn_R_101_FPN_3x.yaml",
     }
     cfgs = []
-    if args.tune == "arch":
+    if args.expt == "arch":
         for model, config_path in models.items():
             cfg = get_mrcnn_cfg(model, config_path=config_path)
             cfgs.append(cfg)
-    elif args.tune == "hparam":
+    elif args.expt == "hparam":
         lrs = [0.025, 0.0025, 0.00025, 0.000025]
         for lr in lrs:
             cfg = get_mrcnn_cfg(lr=lr)
             cfgs.append(cfg)
-    elif args.tune == "data":
-        split_ratios = [(0.1, 0.1), (0.15, 0.15), (0.2, 0.2)]
-        for val_size, test_size in split_ratios:
-            prepare_dataset(val_size, test_size)
-            split_ratio = f"{int((1-val_size-test_size)*100)}-{int(val_size*100)}-{int(test_size*100)}"
-            dataset_name = f"prism_{split_ratio}"
-            register_dataset(dataset_name=dataset_name, annotation_file=f"annotation_{split_ratio}") #
-            cfg = get_mrcnn_cfg(dataset_name=dataset_name)
-            cfg.OUTPUT_DIR = f"{cfg.OUTPUT_DIR}.split_{split_ratio}"
-            cfgs.append(cfg)
     else:
-        if args.config_file:
-            cfg = get_cfg()
-            cfg.merge_from_file(args.config_file)
-            cfg.OUTPUT_DIR = os.path.join("./output", config_file)
-            cfgs.append(cfg)
-        else:
-            cfg = get_mrcnn_cfg()
-            cfgs.append(cfg)
-            # cfg.OUTPUT_DIR = f"{cfg.OUTPUT_DIR}.warmup_200_decay_400"
+        cfg = get_mrcnn_cfg()
+        cfgs.append(cfg)
+        # cfg.OUTPUT_DIR = f"{cfg.OUTPUT_DIR}.warmup_200_decay_400"
     for cfg in cfgs:
         cfg.merge_from_list(args.opts)
     return cfgs
 
 
+import pandas as pd
+
+def run_data_expts(args, num_reps=5):
+    # split_ratios = [(0.1, 0.1), (0.15, 0.15), (0.2, 0.2)]
+    # split_ratios = [(0.1, 0.1)]
+    # split_ratios = [(0.15, 0.15)]
+    split_ratios = [(0.2, 0.2)]
+    for val_size, test_size in split_ratios:
+        metrics_list = []
+        max_iter, output_dir = 0, ""
+        split_ratio_str = f"{int((1-val_size-test_size)*100)}-{int(val_size*100)}-{int(test_size*100)}" # e.g. 70-15-15
+        for i in range(num_reps):
+            dataset_name = f"prism_{split_ratio_str}_{i}"
+            annotation_file = f"annotation_{split_ratio_str}_{i}"
+            prepare_dataset(annotation_file, val_size, test_size, random_state=123+i)
+            register_dataset(dataset_name, annotation_file)
+
+            cfg = get_mrcnn_cfg(dataset_name=dataset_name)
+            cfg.OUTPUT_DIR = f"{cfg.OUTPUT_DIR}.split_{split_ratio_str}/{i}"
+            cfg.merge_from_list(args.opts)
+            cfg.freeze()
+            max_iter, output_dir = cfg.SOLVER.MAX_ITER, os.path.dirname(cfg.OUTPUT_DIR)
+
+            # Train model
+            trainer = train_model(cfg, args)
+
+            # Evaluate on test data
+            metrics_i = evaluate(trainer, cfg, f"{dataset_name}_test")
+            metrics_list.append(flatten_results_dict(metrics_i))
+
+        # Calculate average metrics across repeated runs
+        df = pd.DataFrame.from_dict(metrics_list)
+        s = df.mean(axis=0)
+        metrics = s.to_dict()
+        save_metrics(metrics, output_dir, max_iter):
+
+
+from detectron2.utils.events import EventStorage, JSONWriter
+from detectron2.utils.file_io import PathManager
+from detectron2.evaluation.testing import flatten_results_dict
+
+def save_metrics(metrics, output_dir, iter):
+    PathManager.mkdirs(output_dir)
+    with EventStorage(iter) as storage:
+        writer = JSONWriter(os.path.join(output_dir, "metrics.json"))
+        storage.put_scalars(**metrics)
+        writer.write()
+        writer.close()
+
+
 def main(args):
     setup_logger()
-    prepare_dataset()
-    register_dataset()
 
-    cfgs = setup(args)
-    for cfg in cfgs:
-        if os.path.exists(cfg.OUTPUT_DIR):
-            print(f"{cfg.OUTPUT_DIR} already exists. Skipping config")
-            continue
-        if not args.eval_only:
+    if args.expt == "data":
+        run_data_expts(args)
+    else:
+        prepare_dataset()
+        register_dataset()
+        cfgs = setup_cfgs(args)
+        for cfg in cfgs:
             trainer = train_model(cfg, args)
-        evaluate(trainer, cfg, "prism_val")
+            metrics = evaluate(trainer, cfg, "prism_test")
+            save_metrics(metrics, cfg.OUTPUT_DIR, cfg.SOLVER.MAX_ITER)
 
 
 from detectron2.engine import default_argument_parser, launch
@@ -184,7 +235,7 @@ from detectron2.engine import default_argument_parser, launch
 def parse_args():
     parser = default_argument_parser()
     parser.add_argument(
-        "--tune",
+        "--expt",
         default="",
         type=str,
         choices=["arch", "hparam", "data"],
