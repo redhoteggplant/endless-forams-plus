@@ -13,16 +13,18 @@ from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog, DatasetCatalog
 from detectron2.data.datasets import register_coco_instances, load_coco_json
 
-from dataset import prepare_dataset
+# data functions
+from dataset import prepare_dataset, sample_train
 
+# defaults
 DEFAULT_MODEL = "R50-FPN"
 DEFAULT_CONFIG_PATH = "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
 DEFAULT_BASE_LR = 0.0025
 DEFAULT_IMS_PER_BATCH = 2
-
+DEFAULT_IMAGE_DIR = "./segments/nadiairwanto_PRISM/v0.5.4/"
 
 # register dataset
-def register_dataset(dataset_name="prism", annotation_file="annotation", data_dir="./dataset", image_dir="./segments/nadiairwanto_PRISM/v0.5.4/"):
+def register_dataset(dataset_name="prism", annotation_file="annotation", data_dir="./dataset", image_dir=DEFAULT_IMAGE_DIR):
     for d in ["train", "val", "test"]:
         try:
             register_coco_instances(f"{dataset_name}_{d}", {}, f"{data_dir}/{annotation_file}_{d}.json", image_dir)
@@ -47,14 +49,14 @@ def get_mrcnn_cfg(model=DEFAULT_MODEL, config_path=DEFAULT_CONFIG_PATH,
     cfg.DATALOADER.NUM_WORKERS = 2
     cfg.INPUT.MASK_FORMAT = 'bitmask'
     cfg.SOLVER.MAX_ITER = 500    # 500 iterations seems good enough for the baseline
-    cfg.SOLVER.STEPS = (400,)
+    cfg.SOLVER.STEPS = (400,)   # lr decay
     cfg.SOLVER.WARMUP_ITERS = 200
     cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 128   # faster, and good enough for this toy dataset (default: 512); try 256 next
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1  # only has one class (foram). (see https://detectron2.readthedocs.io/tutorials/datasets.html#update-the-config-for-new-datasets)
     # NOTE: this config means the number of classes, but a few popular unofficial tutorials incorrect uses num_classes+1 here.
 
     exp_string = f"{model.lower()}.lr_{lr}" # .ims_per_batch_{ims_per_batch}"
-    cfg.OUTPUT_DIR = os.path.join("./tmp/output", exp_string)
+    cfg.OUTPUT_DIR = os.path.join("./output", exp_string)
     return cfg
 
 
@@ -167,19 +169,22 @@ def visualize_predictions(dataset_name, annotation_json, image_dir):
 import pandas as pd
 
 def run_data_expts(args, num_reps=5):
-    split_ratios = [(0.1, 0.1), (0.15, 0.15), (0.2, 0.2)]
-    for val_size, test_size in split_ratios:
+    prepare_dataset()
+    register_dataset()
+
+    sample_ratios = map(float, args.sample_ratios.split(','))
+    for sample_ratio in sample_ratios:
         metrics_list = []
         max_iter, output_dir = 0, ""
-        split_ratio_str = f"{int((1-val_size-test_size)*100)}-{int(val_size*100)}-{int(test_size*100)}" # e.g. 70-15-15
         for i in range(num_reps):
-            dataset_name = f"prism_{split_ratio_str}_{i}"
-            annotation_file = f"annotation_{split_ratio_str}_{i}"
-            prepare_dataset(annotation_file, val_size, test_size, random_state=123+i)
-            register_dataset(dataset_name, annotation_file)
+            annotation_train = sample_train(sample_ratio, i)
+            dataset_train = f"prism_{sample_ratio}_{i}_train"
+            register_coco_instances(dataset_train, {}, annotation_train, DEFAULT_IMAGE_DIR)
+            MetadataCatalog.get(dataset_train).set(thing_classes=['planktonic foraminifera']) # [c['name'] for c in dataset.categories])
 
-            cfg = get_mrcnn_cfg(dataset_name=dataset_name)
-            cfg.OUTPUT_DIR = f"{cfg.OUTPUT_DIR}.split_{split_ratio_str}/{i}"
+            cfg = get_mrcnn_cfg()
+            cfg.OUTPUT_DIR = f"{cfg.OUTPUT_DIR}.sample_{sample_ratio}/{i}"
+            cfg.DATASETS.TRAIN = (dataset_train,)
             cfg.merge_from_list(args.opts)
             cfg.freeze()
             max_iter, output_dir = cfg.SOLVER.MAX_ITER, os.path.dirname(cfg.OUTPUT_DIR)
@@ -188,7 +193,7 @@ def run_data_expts(args, num_reps=5):
             trainer = build_and_train_model(cfg, args)
 
             # Evaluate on test data
-            metrics_i = evaluate(trainer, cfg, f"{dataset_name}_test")
+            metrics_i = evaluate(trainer, cfg, "prism_test")
             metrics_list.append(flatten_results_dict(metrics_i))
 
         # Calculate average metrics across repeated runs
@@ -209,7 +214,7 @@ def main(args):
         cfgs = setup_cfgs(args)
         for cfg in cfgs:
             trainer = build_and_train_model(cfg, args)
-            metrics = evaluate(trainer, cfg, "prism_test")
+            metrics = flatten_results_dict(evaluate(trainer, cfg, "prism_test"))
             save_metrics(metrics, cfg.OUTPUT_DIR, cfg.SOLVER.MAX_ITER)
 
 
@@ -227,6 +232,12 @@ def parse_args():
     parser.add_argument(
         "--max-iter", type=int,
         default=500, help="the maximum number of training iterations"
+    )
+    parser.add_argument(
+        "--sample-ratios",
+        default="0.4,0.5,0.6,0.7,0.8,0.9",
+        type=str,
+        help="amount of data to use",
     )
     return parser.parse_args()
 
