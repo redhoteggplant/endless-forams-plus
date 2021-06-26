@@ -14,7 +14,7 @@ from detectron2.data import MetadataCatalog, DatasetCatalog
 from detectron2.data.datasets import register_coco_instances, load_coco_json
 
 # data functions
-from dataset import prepare_dataset, sample_from_train
+from dataset import prepare_dataset, sample_train, get_segments_dataset
 
 # defaults
 DEFAULT_MODEL = "R50-FPN"
@@ -24,8 +24,8 @@ DEFAULT_IMS_PER_BATCH = 2
 DEFAULT_IMAGE_DIR = "./segments/nadiairwanto_PRISM/v0.5.4/"
 
 
-# register dataset
-def register_dataset(dataset_name="prism", annotation_file="annotation", data_dir="./dataset", image_dir=DEFAULT_IMAGE_DIR):
+def register_dataset(dataset_name="prism", annotation_filename="annotation", data_dir="./dataset", image_dir=DEFAULT_IMAGE_DIR):
+    # Register a dataset with detectron2
     for d in ["train", "val", "test"]:
         try:
             register_coco_instances(f"{dataset_name}_{d}", {}, f"{data_dir}/{annotation_filename}_{d}.json", image_dir)
@@ -57,7 +57,7 @@ def get_mrcnn_cfg(model=DEFAULT_MODEL, config_path=DEFAULT_CONFIG_PATH,
     # NOTE: this config means the number of classes, but a few popular unofficial tutorials incorrect uses num_classes+1 here.
 
     exp_string = f"{model.lower()}.lr_{lr}" # .ims_per_batch_{ims_per_batch}"
-    cfg.OUTPUT_DIR = os.path.join("./output", exp_string)
+    cfg.OUTPUT_DIR = os.path.join("./output/augmentations", exp_string)
     return cfg
 
 
@@ -93,6 +93,8 @@ def setup_cfgs(args):
 
 from detectron2.engine import DefaultTrainer, DefaultPredictor
 from detectron2.evaluation import COCOEvaluator
+from detectron2.data import build_detection_train_loader
+from custom_mapper import custom_mapper
 
 class Trainer(DefaultTrainer):
 
@@ -107,6 +109,10 @@ class Trainer(DefaultTrainer):
         assert evaluator_type == "coco"
         return COCOEvaluator(dataset_name, ("bbox", "segm"), False, output_dir=output_folder)
 
+    @classmethod
+    def build_train_loader(cls, cfg):
+        return build_detection_train_loader(cfg, mapper=custom_mapper)
+
 
 def build_and_train_model(cfg, args):
     skip_train = args.eval_only or os.path.exists(cfg.OUTPUT_DIR)
@@ -120,7 +126,7 @@ def build_and_train_model(cfg, args):
     return trainer
 
 
-from utils import Model
+from utils import CustomModel
 
 def load_model(cfg):
     cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, "model_final.pth")
@@ -129,7 +135,7 @@ def load_model(cfg):
 
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     predictor = DefaultPredictor(cfg)
-    model = Model(predictor)
+    model = CustomModel(predictor)
     return model
 
 
