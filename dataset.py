@@ -7,6 +7,7 @@ import json
 from sklearn.model_selection import train_test_split
 
 import os
+import random
 
 DATA_DIR = "./dataset"
 
@@ -18,8 +19,9 @@ def get_segments_dataset(
     """
     Obtain reviewed images from the specified Segments.ai dataset release.
     """
-    if os.path.exists(annotation_file):
-        return annotation_file, os.path.join(dataset_name, release_name)
+    image_dir = f"segments/nadiairwanto_PRISM/{release_name}"
+    if os.path.exists(annotation_file) and os.path.exists(image_dir):
+        return annotation_file, image_dir
 
     # Set up the client
     API_KEY = '2eea99b9f8e79adaf162c8736a6969277e1a2c47'
@@ -54,6 +56,25 @@ def split_dataset(images, val_size, test_size, random_state):
     images_train, images_val = train_test_split(images_train,
         test_size=val_size/(1-test_size), random_state=random_state)
     return images_train, images_val, images_test
+
+
+def sample_train(sample_ratio=1.0, idx=0, annot_name="annotation", random_seed=123):
+    json_train = f"{DATA_DIR}/{annot_name}_train.json"
+
+    # save train, val, and test datasets
+    with open(json_train, 'rt') as annotations:
+        coco = json.load(annotations)
+        info = coco['info']
+        images = coco['images']
+        annotations = coco['annotations']
+        categories = coco['categories']
+
+        random.seed(random_seed + idx)
+        images_train = random.sample(images, int(sample_ratio * len(images)))
+
+        train_sample = f"{DATA_DIR}/{annot_name}_{sample_ratio}_{idx}_train.json"
+        save_coco(train_sample, info, images_train, annotations, categories)
+        return train_sample
 
 
 def prepare_dataset(annot_name="annotation", val_size=0.15, test_size=0.15, random_state=123):
