@@ -13,19 +13,22 @@ from detectron2.config import get_cfg
 from detectron2.data import MetadataCatalog, DatasetCatalog
 from detectron2.data.datasets import register_coco_instances, load_coco_json
 
-from dataset import prepare_dataset
+# data functions
+from dataset import prepare_dataset, sample_train, get_segments_dataset
 
+# defaults
 DEFAULT_MODEL = "R50-FPN"
 DEFAULT_CONFIG_PATH = "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
 DEFAULT_BASE_LR = 0.0025
 DEFAULT_IMS_PER_BATCH = 2
+DEFAULT_IMAGE_DIR = "./segments/nadiairwanto_PRISM/v0.5.4/"
 
 
-# register dataset
-def register_dataset(dataset_name="prism", annotation_file="annotation", data_dir="./dataset", image_dir="./segments/nadiairwanto_PRISM/v0.5.4/"):
+def register_dataset(dataset_name="prism", annotation_filename="annotation", data_dir="./dataset", image_dir=DEFAULT_IMAGE_DIR):
+    # Register a dataset with detectron2
     for d in ["train", "val", "test"]:
         try:
-            register_coco_instances(f"{dataset_name}_{d}", {}, f"{data_dir}/{annotation_file}_{d}.json", image_dir)
+            register_coco_instances(f"{dataset_name}_{d}", {}, f"{data_dir}/{annotation_filename}_{d}.json", image_dir)
         except:
             print(f"Dataset {dataset_name}_{d} is already registered")
         MetadataCatalog.get(f"{dataset_name}_{d}").set(thing_classes=['planktonic foraminifera']) # [c['name'] for c in dataset.categories])
@@ -47,14 +50,14 @@ def get_mrcnn_cfg(model=DEFAULT_MODEL, config_path=DEFAULT_CONFIG_PATH,
     cfg.DATALOADER.NUM_WORKERS = 2
     cfg.INPUT.MASK_FORMAT = 'bitmask'
     cfg.SOLVER.MAX_ITER = 500    # 500 iterations seems good enough for the baseline
-    cfg.SOLVER.STEPS = (400,)
+    cfg.SOLVER.STEPS = (400,)   # lr decay
     cfg.SOLVER.WARMUP_ITERS = 200
     cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 128   # faster, and good enough for this toy dataset (default: 512); try 256 next
     cfg.MODEL.ROI_HEADS.NUM_CLASSES = 1  # only has one class (foram). (see https://detectron2.readthedocs.io/tutorials/datasets.html#update-the-config-for-new-datasets)
     # NOTE: this config means the number of classes, but a few popular unofficial tutorials incorrect uses num_classes+1 here.
 
     exp_string = f"{model.lower()}.lr_{lr}" # .ims_per_batch_{ims_per_batch}"
-    cfg.OUTPUT_DIR = os.path.join("./tmp/output", exp_string)
+    cfg.OUTPUT_DIR = os.path.join("./output/augmentations", exp_string)
     return cfg
 
 
@@ -81,7 +84,6 @@ def setup_cfgs(args):
     else:
         cfg = get_mrcnn_cfg()
         cfgs.append(cfg)
-        # cfg.OUTPUT_DIR = f"{cfg.OUTPUT_DIR}.warmup_200_decay_400"
     for cfg in cfgs:
         cfg.merge_from_list(args.opts)
     return cfgs
@@ -89,7 +91,7 @@ def setup_cfgs(args):
 
 ## Train!
 
-from detectron2.engine import DefaultTrainer
+from detectron2.engine import DefaultTrainer, DefaultPredictor
 from detectron2.evaluation import COCOEvaluator
 
 class Trainer(DefaultTrainer):
@@ -106,7 +108,6 @@ class Trainer(DefaultTrainer):
         return COCOEvaluator(dataset_name, ("bbox", "segm"), False, output_dir=output_folder)
 
 
-
 def build_and_train_model(cfg, args):
     skip_train = args.eval_only or os.path.exists(cfg.OUTPUT_DIR)
     if os.path.exists(cfg.OUTPUT_DIR):
@@ -117,6 +118,48 @@ def build_and_train_model(cfg, args):
     if not skip_train:
         trainer.train()
     return trainer
+
+
+from utils import Model
+
+def load_model(cfg):
+    cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, "model_final.pth")
+    cfg.TEST.DETECTIONS_PER_IMAGE = 100 # is this needed?
+    cfg.freeze()
+
+    os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
+    predictor = DefaultPredictor(cfg)
+    model = Model(predictor)
+    return model
+
+
+import cv2
+from detectron2.utils.visualizer import Visualizer, ColorMode
+
+def visualize_and_save_predictions(cfg, print_images=False):
+    annotation_json, image_dir = get_segments_dataset()
+    dataset_dicts = load_coco_json(annotation_json, image_dir)
+    segments_metadata = MetadataCatalog.get(cfg.DATASETS.TEST[0]).set(thing_classes=['planktonic foraminifera'])
+    model = load_model(cfg)
+
+    pred_dir = os.path.join(cfg.OUTPUT_DIR, "predictions")
+    os.makedirs(pred_dir)
+    for d in dataset_dicts:
+        im = cv2.imread(d["file_name"])
+        outputs = model.predictor(im)  # format is documented at https://detectron2.readthedocs.io/tutorials/models.html#model-output-format
+        v = Visualizer(im[:, :, ::-1],
+                    metadata=segments_metadata,
+                    scale=0.2,
+                    instance_mode=ColorMode.IMAGE_BW   # remove the colors of unsegmented pixels. This option is only available for segmentation models
+        )
+        out = v.draw_instance_predictions(outputs["instances"].to("cpu"))
+        cv2.imwrite(os.path.join(pred_dir, d["file_name"].split("/")[-1]),
+            out.get_image()[:, :, ::-1])
+        if print_images:
+            print(d["file_name"].split("/")[-1])
+            cv2.imshow(out.get_image()[:, :, ::-1])
+
+    print(f"{len(os.listdir(pred_dir))} visualizations saved to {pred_dir}")
 
 
 def evaluate(trainer, cfg, dataset_name):
@@ -133,7 +176,6 @@ def evaluate(trainer, cfg, dataset_name):
 
 from detectron2.utils.events import EventStorage, JSONWriter
 from detectron2.utils.file_io import PathManager
-from detectron2.evaluation.testing import flatten_results_dict
 
 def save_metrics(metrics, output_dir, iter):
     PathManager.mkdirs(output_dir)
@@ -144,42 +186,26 @@ def save_metrics(metrics, output_dir, iter):
         writer.close()
 
 
-"""Then, we randomly select several samples to visualize the prediction results."""
-
-from detectron2.utils.visualizer import Visualizer, ColorMode
-
-def visualize_predictions(dataset_name, annotation_json, image_dir):
-    dataset_dicts = load_coco_json(annotation_json, image_dir)
-    metadata = MetadataCatalog.get(dataset_name)
-    for d in dataset_dicts: # random.sample(dataset_dicts, 3):
-        im = cv2.imread(d["file_name"])
-        print(d["file_name"].split("/")[-1])
-        outputs = predictor(im)  # format is documented at https://detectron2.readthedocs.io/tutorials/models.html#model-output-format
-        v = Visualizer(im[:, :, ::-1],
-                       metadata=metadata,
-                       scale=0.2,
-                       instance_mode=ColorMode.IMAGE_BW   # remove the colors of unsegmented pixels. This option is only available for segmentation models
-        )
-        out = v.draw_instance_predictions(outputs["instances"].to("cpu"))
-        cv2.imshow(out.get_image()[:, :, ::-1])
-
-
+from detectron2.evaluation.testing import flatten_results_dict
 import pandas as pd
 
 def run_data_expts(args, num_reps=5):
-    split_ratios = [(0.1, 0.1), (0.15, 0.15), (0.2, 0.2)]
-    for val_size, test_size in split_ratios:
+    prepare_dataset()
+    register_dataset()
+
+    sample_ratios = map(float, args.sample_ratios.split(','))
+    for sample_ratio in sample_ratios:
         metrics_list = []
         max_iter, output_dir = 0, ""
-        split_ratio_str = f"{int((1-val_size-test_size)*100)}-{int(val_size*100)}-{int(test_size*100)}" # e.g. 70-15-15
         for i in range(num_reps):
-            dataset_name = f"prism_{split_ratio_str}_{i}"
-            annotation_file = f"annotation_{split_ratio_str}_{i}"
-            prepare_dataset(annotation_file, val_size, test_size, random_state=123+i)
-            register_dataset(dataset_name, annotation_file)
+            annotation_train = sample_train(sample_ratio, i)
+            dataset_train = f"prism_{sample_ratio}_{i}_train"
+            register_coco_instances(dataset_train, {}, annotation_train, DEFAULT_IMAGE_DIR)
+            MetadataCatalog.get(dataset_train).set(thing_classes=['planktonic foraminifera']) # [c['name'] for c in dataset.categories])
 
-            cfg = get_mrcnn_cfg(dataset_name=dataset_name)
-            cfg.OUTPUT_DIR = f"{cfg.OUTPUT_DIR}.split_{split_ratio_str}/{i}"
+            cfg = get_mrcnn_cfg()
+            cfg.OUTPUT_DIR = f"{cfg.OUTPUT_DIR}.sample_{sample_ratio}/{i}"
+            cfg.DATASETS.TRAIN = (dataset_train,)
             cfg.merge_from_list(args.opts)
             cfg.freeze()
             max_iter, output_dir = cfg.SOLVER.MAX_ITER, os.path.dirname(cfg.OUTPUT_DIR)
@@ -188,7 +214,7 @@ def run_data_expts(args, num_reps=5):
             trainer = build_and_train_model(cfg, args)
 
             # Evaluate on test data
-            metrics_i = evaluate(trainer, cfg, f"{dataset_name}_test")
+            metrics_i = evaluate(trainer, cfg, "prism_test")
             metrics_list.append(flatten_results_dict(metrics_i))
 
         # Calculate average metrics across repeated runs
@@ -208,9 +234,12 @@ def main(args):
         register_dataset()
         cfgs = setup_cfgs(args)
         for cfg in cfgs:
-            trainer = build_and_train_model(cfg, args)
-            metrics = evaluate(trainer, cfg, "prism_test")
-            save_metrics(metrics, cfg.OUTPUT_DIR, cfg.SOLVER.MAX_ITER)
+            if args.vis_only:
+                visualize_and_save_predictions(cfg)
+            else:
+                trainer = build_and_train_model(cfg, args)
+                metrics = flatten_results_dict(evaluate(trainer, cfg, "prism_test"))
+                save_metrics(metrics, cfg.OUTPUT_DIR, cfg.SOLVER.MAX_ITER)
 
 
 from detectron2.engine import default_argument_parser, launch
@@ -227,6 +256,16 @@ def parse_args():
     parser.add_argument(
         "--max-iter", type=int,
         default=500, help="the maximum number of training iterations"
+    )
+    parser.add_argument(
+        "--sample-ratios",
+        default="0.4,0.5,0.6,0.7,0.8,0.9",
+        type=str,
+        help="amount of data to use",
+    )
+    parser.add_argument(
+        "--vis-only", default=False, action='store_true',
+        help="visualize and save predictions"
     )
     return parser.parse_args()
 
