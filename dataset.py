@@ -58,7 +58,7 @@ def split_dataset(images, val_size, test_size, random_state):
     return images_train, images_val, images_test
 
 
-def sample_train(sample_ratio=1.0, idx=0, annot_name="annotation", random_seed=123):
+def sample_from_train(sample_ratio=1.0, idx=0, annot_name="annotation", random_seed=123):
     json_train = f"{DATA_DIR}/{annot_name}_train.json"
 
     # save train, val, and test datasets

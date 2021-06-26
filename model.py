@@ -14,7 +14,7 @@ from detectron2.data import MetadataCatalog, DatasetCatalog
 from detectron2.data.datasets import register_coco_instances, load_coco_json
 
 # data functions
-from dataset import prepare_dataset, sample_train, get_segments_dataset
+from dataset import prepare_dataset, sample_from_train
 
 # defaults
 DEFAULT_MODEL = "R50-FPN"
@@ -24,8 +24,8 @@ DEFAULT_IMS_PER_BATCH = 2
 DEFAULT_IMAGE_DIR = "./segments/nadiairwanto_PRISM/v0.5.4/"
 
 
-def register_dataset(dataset_name="prism", annotation_filename="annotation", data_dir="./dataset", image_dir=DEFAULT_IMAGE_DIR):
-    # Register a dataset with detectron2
+# register dataset
+def register_dataset(dataset_name="prism", annotation_file="annotation", data_dir="./dataset", image_dir=DEFAULT_IMAGE_DIR):
     for d in ["train", "val", "test"]:
         try:
             register_coco_instances(f"{dataset_name}_{d}", {}, f"{data_dir}/{annotation_filename}_{d}.json", image_dir)
@@ -57,7 +57,7 @@ def get_mrcnn_cfg(model=DEFAULT_MODEL, config_path=DEFAULT_CONFIG_PATH,
     # NOTE: this config means the number of classes, but a few popular unofficial tutorials incorrect uses num_classes+1 here.
 
     exp_string = f"{model.lower()}.lr_{lr}" # .ims_per_batch_{ims_per_batch}"
-    cfg.OUTPUT_DIR = os.path.join("./output/augmentations", exp_string)
+    cfg.OUTPUT_DIR = os.path.join("./output", exp_string)
     return cfg
 
 
@@ -198,7 +198,7 @@ def run_data_expts(args, num_reps=5):
         metrics_list = []
         max_iter, output_dir = 0, ""
         for i in range(num_reps):
-            annotation_train = sample_train(sample_ratio, i)
+            annotation_train = sample_from_train(sample_ratio, i)
             dataset_train = f"prism_{sample_ratio}_{i}_train"
             register_coco_instances(dataset_train, {}, annotation_train, DEFAULT_IMAGE_DIR)
             MetadataCatalog.get(dataset_train).set(thing_classes=['planktonic foraminifera']) # [c['name'] for c in dataset.categories])
