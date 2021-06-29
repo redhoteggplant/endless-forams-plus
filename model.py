@@ -14,7 +14,7 @@ from detectron2.data import MetadataCatalog, DatasetCatalog
 from detectron2.data.datasets import register_coco_instances, load_coco_json
 
 # data functions
-from dataset import prepare_dataset, sample_train, get_segments_dataset
+from dataset import prepare_dataset, sample_from_train, get_segments_dataset
 
 # defaults
 DEFAULT_MODEL = "R50-FPN"
@@ -22,13 +22,17 @@ DEFAULT_CONFIG_PATH = "COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml"
 DEFAULT_BASE_LR = 0.0025
 DEFAULT_IMS_PER_BATCH = 2
 DEFAULT_IMAGE_DIR = "./segments/nadiairwanto_PRISM/v0.5.4/"
+DEFAULT_DATASET_NAME="prism"
+DEFAULT_OUTPUT_DIR="./output"
 
-
-def register_dataset(dataset_name="prism", annotation_filename="annotation", data_dir="./dataset", image_dir=DEFAULT_IMAGE_DIR):
+def register_dataset(dataset_name=DEFAULT_DATASET_NAME,
+    annotation_filename="annotation", data_dir="./dataset",
+    image_dir=DEFAULT_IMAGE_DIR):
     # Register a dataset with detectron2
     for d in ["train", "val", "test"]:
         try:
-            register_coco_instances(f"{dataset_name}_{d}", {}, f"{data_dir}/{annotation_filename}_{d}.json", image_dir)
+            register_coco_instances(f"{dataset_name}_{d}", {},
+                f"{data_dir}/{annotation_filename}_{d}.json", image_dir)
         except:
             print(f"Dataset {dataset_name}_{d} is already registered")
         MetadataCatalog.get(f"{dataset_name}_{d}").set(thing_classes=['planktonic foraminifera']) # [c['name'] for c in dataset.categories])
@@ -36,7 +40,7 @@ def register_dataset(dataset_name="prism", annotation_filename="annotation", dat
 
 def get_mrcnn_cfg(model=DEFAULT_MODEL, config_path=DEFAULT_CONFIG_PATH,
     lr=DEFAULT_BASE_LR, ims_per_batch=DEFAULT_IMS_PER_BATCH,
-    dataset_name="prism"
+    dataset_name=DEFAULT_DATASET_NAME, output_dir=DEFAULT_OUTPUT_DIR
 ):
     cfg = get_cfg()
     cfg.merge_from_file(model_zoo.get_config_file(config_path))
@@ -57,7 +61,7 @@ def get_mrcnn_cfg(model=DEFAULT_MODEL, config_path=DEFAULT_CONFIG_PATH,
     # NOTE: this config means the number of classes, but a few popular unofficial tutorials incorrect uses num_classes+1 here.
 
     exp_string = f"{model.lower()}.lr_{lr}" # .ims_per_batch_{ims_per_batch}"
-    cfg.OUTPUT_DIR = os.path.join("./output/augmentations", exp_string)
+    cfg.OUTPUT_DIR = os.path.join(output_dir, exp_string)
     return cfg
 
 
@@ -74,15 +78,15 @@ def setup_cfgs(args):
     cfgs = []
     if args.expt == "arch":
         for model, config_path in models.items():
-            cfg = get_mrcnn_cfg(model, config_path=config_path)
+            cfg = get_mrcnn_cfg(model, config_path=config_path, output_dir=args.output_dir)
             cfgs.append(cfg)
     elif args.expt == "hparam":
         lrs = [0.025, 0.0025, 0.00025, 0.000025]
         for lr in lrs:
-            cfg = get_mrcnn_cfg(lr=lr)
+            cfg = get_mrcnn_cfg(lr=lr, output_dir=args.output_dir)
             cfgs.append(cfg)
     else:
-        cfg = get_mrcnn_cfg()
+        cfg = get_mrcnn_cfg(output_dir=args.output_dir)
         cfgs.append(cfg)
     for cfg in cfgs:
         cfg.merge_from_list(args.opts)
@@ -115,13 +119,13 @@ class Trainer(DefaultTrainer):
 
 
 def build_and_train_model(cfg, args):
-    skip_train = args.eval_only or os.path.exists(cfg.OUTPUT_DIR)
-    if os.path.exists(cfg.OUTPUT_DIR):
-        print(f"{cfg.OUTPUT_DIR} already exists. Skipping training")
     os.makedirs(cfg.OUTPUT_DIR, exist_ok=True)
     trainer = Trainer(cfg)
     trainer.resume_or_load(resume=args.resume)
-    if not skip_train:
+    skip_train = os.path.exists(os.path.join(cfg.OUTPUT_DIR, "model_final.pth"))
+    if skip_train:
+        print(f"{cfg.OUTPUT_DIR} already contains final model weights. Skipping training")
+    if not skip_train and not args.eval_only:
         trainer.train()
     return trainer
 
@@ -139,36 +143,7 @@ def load_model(cfg):
     return model
 
 
-import cv2
-from detectron2.utils.visualizer import Visualizer, ColorMode
-
-def visualize_and_save_predictions(cfg, print_images=False):
-    annotation_json, image_dir = get_segments_dataset()
-    dataset_dicts = load_coco_json(annotation_json, image_dir)
-    segments_metadata = MetadataCatalog.get(cfg.DATASETS.TEST[0]).set(thing_classes=['planktonic foraminifera'])
-    model = load_model(cfg)
-
-    pred_dir = os.path.join(cfg.OUTPUT_DIR, "predictions")
-    os.makedirs(pred_dir)
-    for d in dataset_dicts:
-        im = cv2.imread(d["file_name"])
-        outputs = model.predictor(im)  # format is documented at https://detectron2.readthedocs.io/tutorials/models.html#model-output-format
-        v = Visualizer(im[:, :, ::-1],
-                    metadata=segments_metadata,
-                    scale=0.2,
-                    instance_mode=ColorMode.IMAGE_BW   # remove the colors of unsegmented pixels. This option is only available for segmentation models
-        )
-        out = v.draw_instance_predictions(outputs["instances"].to("cpu"))
-        cv2.imwrite(os.path.join(pred_dir, d["file_name"].split("/")[-1]),
-            out.get_image()[:, :, ::-1])
-        if print_images:
-            print(d["file_name"].split("/")[-1])
-            cv2.imshow(out.get_image()[:, :, ::-1])
-
-    print(f"{len(os.listdir(pred_dir))} visualizations saved to {pred_dir}")
-
-
-def evaluate(trainer, cfg, dataset_name):
+def evaluate(trainer, cfg, dataset_name=f"{DEFAULT_DATASET_NAME}_test"):
     cfg.defrost()
     cfg.MODEL.WEIGHTS = os.path.join(cfg.OUTPUT_DIR, "model_final.pth")
     cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.7  # set a custom testing threshold; default = 0.05
@@ -220,7 +195,7 @@ def run_data_expts(args, num_reps=5):
             trainer = build_and_train_model(cfg, args)
 
             # Evaluate on test data
-            metrics_i = evaluate(trainer, cfg, "prism_test")
+            metrics_i = evaluate(trainer, cfg)
             metrics_list.append(flatten_results_dict(metrics_i))
 
         # Calculate average metrics across repeated runs
@@ -229,6 +204,7 @@ def run_data_expts(args, num_reps=5):
         metrics = s.to_dict()
         save_metrics(metrics, output_dir, max_iter)
 
+from visualization import visualize_predictions, visualize_data_augmentations
 
 def main(args):
     setup_logger()
@@ -240,24 +216,27 @@ def main(args):
         register_dataset()
         cfgs = setup_cfgs(args)
         for cfg in cfgs:
-            if args.vis_only:
-                visualize_and_save_predictions(cfg)
+            if args.vis_preds:
+                model = load_model(cfg)
+                visualize_predictions(model, cfg, args.show_images)
+            elif args.vis_augs:
+                visualize_data_augmentations(cfg, args.show_images)
             else:
                 trainer = build_and_train_model(cfg, args)
-                metrics = flatten_results_dict(evaluate(trainer, cfg, "prism_test"))
+                metrics = flatten_results_dict(evaluate(trainer, cfg))
                 save_metrics(metrics, cfg.OUTPUT_DIR, cfg.SOLVER.MAX_ITER)
 
 
 from detectron2.engine import default_argument_parser, launch
 
 def parse_args():
-    parser = default_argument_parser()
+    parser = default_argument_parser(epilog="Train an instance segmentation model on PRISM data")
     parser.add_argument(
         "--expt",
         default="",
         type=str,
         choices=["arch", "hparam", "data"],
-        help="whether to tune the model architecture, hyperparameters, or none",
+        help="whether to tune the model architecture, hyperparameters, amount of training data, or none",
     )
     parser.add_argument(
         "--max-iter", type=int,
@@ -267,12 +246,18 @@ def parse_args():
         "--sample-ratios",
         default="0.4,0.5,0.6,0.7,0.8,0.9",
         type=str,
-        help="amount of data to use",
+        help="proportions of training images to use",
     )
     parser.add_argument(
-        "--vis-only", default=False, action='store_true',
-        help="visualize and save predictions"
+        "--vis-preds", default=False, action='store_true',
+        help="load trained model and visualize predictions"
     )
+    parser.add_argument(
+        "--vis-augs", default=False, action='store_true',
+        help="visualize data augmentations"
+    )
+    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR, help="path to output directory")
+    parser.add_argument("--show-images", action="store_true", help="show visualization output in a window")
     return parser.parse_args()
 
 
